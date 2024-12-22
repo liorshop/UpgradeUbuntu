@@ -12,11 +12,9 @@ log() {
     echo "${timestamp} [${level}] ${message}" | tee -a "${LOG_FILE}"
 }
 
-# Pre-configure all PostgreSQL-related prompts
+# Pre-configure PostgreSQL prompts
 pre_configure_postgres() {
     log "INFO" "Pre-configuring PostgreSQL removal options"
-    
-    # Set all possible PostgreSQL prompts to non-interactive
     echo "postgresql-common postgresql-common/purge-data boolean true" | debconf-set-selections
     echo "postgresql-11 postgresql-11/purge-data boolean true" | debconf-set-selections
     echo "postgresql-12 postgresql-12/purge-data boolean true" | debconf-set-selections
@@ -24,7 +22,6 @@ pre_configure_postgres() {
     echo "postgresql-14 postgresql-14/purge-data boolean true" | debconf-set-selections
     echo "postgresql-15 postgresql-15/purge-data boolean true" | debconf-set-selections
     
-    # Force removal configuration
     mkdir -p /etc/dpkg/dpkg.cfg.d
     cat > /etc/dpkg/dpkg.cfg.d/postgresql-noninteractive << EOF
 force-confdef
@@ -48,35 +45,26 @@ backup_postgres() {
 
 cleanup_postgres() {
     log "INFO" "Starting PostgreSQL cleanup"
-    
-    # Stop PostgreSQL services first
     systemctl stop postgresql* || true
     systemctl disable postgresql* || true
-    
-    # Kill any remaining PostgreSQL processes
     pkill postgres || true
     pkill postgresql || true
+    sleep 5
     
-    sleep 5  # Give processes time to stop
-    
-    # Force remove all PostgreSQL packages
     DEBIAN_FRONTEND=noninteractive apt-get purge -y \
         postgresql* \
         postgresql-*-* \
         postgresql-client* \
         postgresql-common* \
         --allow-change-held-packages || true
-        
-    # Force remove any remaining packages
+    
     dpkg --force-all --purge postgresql* || true
     
-    # Remove all PostgreSQL directories
     rm -rf /var/lib/postgresql/
     rm -rf /etc/postgresql/
     rm -rf /var/log/postgresql/
     rm -rf /var/run/postgresql/
     
-    # Clean package system
     apt-get autoremove -y || true
     apt-get clean
 }
@@ -107,8 +95,6 @@ cleanup_packages() {
 
 cleanup_sources() {
     log "INFO" "Cleaning up package sources"
-    
-    # Remove repository configurations
     rm -f /etc/apt/sources.list.d/pgdg*.list
     rm -f /etc/apt/sources.list.d/postgresql*.list
     
@@ -139,17 +125,9 @@ main() {
     fi
     
     mkdir -p "${BASE_DIR}"
-    
-    # First pre-configure everything
     pre_configure_postgres
-    
-    # Then backup the database
     backup_postgres
-    
-    # Clean up PostgreSQL completely
     cleanup_postgres
-    
-    # Continue with other cleanups
     cleanup_packages
     cleanup_sources
     
