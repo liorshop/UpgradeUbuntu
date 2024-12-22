@@ -1,17 +1,16 @@
 #!/bin/bash
 
-source $(dirname "${BASH_SOURCE[0]}")/logger.sh
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/logger.sh"
 
 # Monitoring configuration
 MONITORING_INTERVAL=300  # 5 minutes
 ALERT_DISK_THRESHOLD=85  # Alert if disk usage > 85%
 ALERT_MEM_THRESHOLD=90   # Alert if memory usage > 90%
+ALERT_LOAD_THRESHOLD=8   # Alert if load average > 8
 
 # System metrics collection
 collect_metrics() {
-    local component="MONITOR"
-    
-    # Collect system metrics
     local cpu_load=$(cat /proc/loadavg | awk '{print $1}')
     local mem_total=$(free -m | awk '/Mem:/ {print $2}')
     local mem_used=$(free -m | awk '/Mem:/ {print $3}')
@@ -19,29 +18,37 @@ collect_metrics() {
     local disk_percent=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
     
     # Log metrics
-    log "STAT" "${component}" "METRICS cpu_load=${cpu_load},mem_used=${mem_percent}%,disk_used=${disk_percent}%"
+    log "STAT" "MONITOR" "METRICS cpu_load=${cpu_load},mem_used=${mem_percent}%,disk_used=${disk_percent}%"
     
-    # Check thresholds and alert if necessary
+    # Check thresholds
     if [ ${disk_percent} -gt ${ALERT_DISK_THRESHOLD} ]; then
-        log "ERROR" "${component}" "Disk usage critical: ${disk_percent}%"
+        log "ERROR" "MONITOR" "Disk usage critical: ${disk_percent}%"
+        return 1
     fi
     
     if [ ${mem_percent} -gt ${ALERT_MEM_THRESHOLD} ]; then
-        log "ERROR" "${component}" "Memory usage critical: ${mem_percent}%"
+        log "ERROR" "MONITOR" "Memory usage critical: ${mem_percent}%"
+        return 1
     fi
+    
+    if (( $(echo "${cpu_load} > ${ALERT_LOAD_THRESHOLD}" | bc -l) )); then
+        log "ERROR" "MONITOR" "System load critical: ${cpu_load}"
+        return 1
+    fi
+    
+    return 0
 }
 
 # Process monitoring
 check_processes() {
     local component="MONITOR"
+    local critical_processes=("apt" "dpkg" "do-release-upgrade")
     
-    # Check upgrade-related processes
-    local processes=("apt" "dpkg" "do-release-upgrade")
-    for proc in "${processes[@]}"; do
-        if pgrep -f "${proc}" > /dev/null; then
+    for proc in "${critical_processes[@]}"; do
+        if pgrep -f "${proc}" >/dev/null; then
             local pid=$(pgrep -f "${proc}")
-            local cpu=$(ps -p ${pid} -o %cpu=)
-            local mem=$(ps -p ${pid} -o %mem=)
+            local cpu=$(ps -p ${pid} -o %cpu= 2>/dev/null || echo "N/A")
+            local mem=$(ps -p ${pid} -o %mem= 2>/dev/null || echo "N/A")
             log "DEBUG" "${component}" "Process ${proc} running (PID: ${pid}, CPU: ${cpu}%, MEM: ${mem}%)"
         fi
     done
@@ -51,51 +58,44 @@ check_processes() {
 check_network() {
     local component="MONITOR"
     local targets=("archive.ubuntu.com" "security.ubuntu.com")
+    local failed=0
     
     for target in "${targets[@]}"; do
-        if ! ping -c 1 ${target} &>/dev/null; then
+        if ! ping -c 1 -W 5 ${target} >/dev/null 2>&1; then
             log "ERROR" "${component}" "Network connectivity failed to ${target}"
-        else
-            log "DEBUG" "${component}" "Network connectivity OK to ${target}"
+            failed=$((failed + 1))
         fi
     done
-}
-
-# Package operation monitoring
-monitor_package_operations() {
-    local component="MONITOR"
     
-    # Check for locked dpkg/apt
-    if lsof /var/lib/dpkg/lock-frontend &>/dev/null; then
-        log "DEBUG" "${component}" "Package system is locked (normal during upgrade)"
-    fi
-    
-    # Check for interrupted upgrades
-    if [ -f "/var/lib/dpkg/updates/" ]; then
-        log "ERROR" "${component}" "Detected interrupted package operations"
-    fi
+    return ${failed}
 }
 
 # Service health monitoring
 check_services() {
     local component="MONITOR"
     local critical_services=("systemd" "networking" "ssh")
+    local failed=0
     
     for service in "${critical_services[@]}"; do
         if ! systemctl is-active --quiet ${service}; then
             log "ERROR" "${component}" "Critical service ${service} is not running"
+            failed=$((failed + 1))
         fi
     done
+    
+    return ${failed}
 }
 
 # Main monitoring loop
 monitor_loop() {
+    local component="MONITOR"
+    log "INFO" "${component}" "Starting system monitoring"
+    
     while true; do
-        collect_metrics
+        collect_metrics || log "WARN" "${component}" "Metrics collection failed"
         check_processes
-        check_network
-        monitor_package_operations
-        check_services
+        check_network || log "WARN" "${component}" "Network check failed"
+        check_services || log "WARN" "${component}" "Service check failed"
         
         sleep ${MONITORING_INTERVAL}
     done
@@ -103,13 +103,16 @@ monitor_loop() {
 
 # Start monitoring in background
 start_monitoring() {
-    monitor_loop & echo $! > "/var/run/upgrade-monitor.pid"
+    monitor_loop & 
+    echo $! > "${LOCK_DIR}/monitor.pid"
+    log "INFO" "MONITOR" "Monitoring started with PID $(cat "${LOCK_DIR}/monitor.pid")"
 }
 
 # Stop monitoring
 stop_monitoring() {
-    if [ -f "/var/run/upgrade-monitor.pid" ]; then
-        kill $(cat "/var/run/upgrade-monitor.pid")
-        rm -f "/var/run/upgrade-monitor.pid"
+    if [ -f "${LOCK_DIR}/monitor.pid" ]; then
+        kill $(cat "${LOCK_DIR}/monitor.pid") 2>/dev/null || true
+        rm -f "${LOCK_DIR}/monitor.pid"
+        log "INFO" "MONITOR" "Monitoring stopped"
     fi
 }

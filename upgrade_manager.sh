@@ -2,139 +2,120 @@
 
 set -euo pipefail
 
-# Base configuration
+# Base paths
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-BASE_DIR="/update/upgrade"
-STATE_FILE="${BASE_DIR}/.upgrade_state"
-LOCK_FILE="${BASE_DIR}/.upgrade.lock"
 COMPONENT="UPGRADE"
-DB_NAME="bobe"
 
 # Source required modules
+source "${SCRIPT_DIR}/common.sh"
 source "${SCRIPT_DIR}/logger.sh"
-source "${SCRIPT_DIR}/monitor.sh"
+source "${SCRIPT_DIR}/state_manager.sh"
 
-# Initialize logging
-init_logging
-
-# Lock file management
-acquire_lock() {
-    local pid
-    if [ -f "${LOCK_FILE}" ]; then
-        pid=$(cat "${LOCK_FILE}" 2>/dev/null)
-        if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
-            log "ERROR" "${COMPONENT}" "Another upgrade process is running (PID: ${pid})"
-            exit 1
-        fi
-        log "WARN" "${COMPONENT}" "Removing stale lock file"
-        rm -f "${LOCK_FILE}"
-    fi
-    echo $$ > "${LOCK_FILE}"
-}
-
-release_lock() {
-    rm -f "${LOCK_FILE}"
-}
-
-# State management
-get_state() {
-    local state
-    if [ ! -f "${STATE_FILE}" ]; then
-        state="initial"
-    elif ! state=$(tr -d '\n\r' < "${STATE_FILE}" 2>/dev/null); then
-        log "ERROR" "${COMPONENT}" "Failed to read state file"
-        return 1
-    elif [ -z "${state}" ]; then
-        log "ERROR" "${COMPONENT}" "State file empty"
-        return 1
-    elif ! echo "${state}" | grep -qE '^(initial|22\.04|24\.04|setup)$'; then
-        log "ERROR" "${COMPONENT}" "Invalid state: ${state}"
-        return 1
-    fi
-    echo "${state}"
-}
-
-save_state() {
-    local new_state=$1
-    if ! echo "${new_state}" | grep -qE '^(initial|22\.04|24\.04|setup)$'; then
-        log "ERROR" "${COMPONENT}" "Attempting to save invalid state: ${new_state}"
-        return 1
-    fi
+# Pre-upgrade system validation
+validate_system() {
+    log "INFO" "${COMPONENT}" "Validating system state"
     
-    if ! echo "${new_state}" > "${STATE_FILE}.tmp"; then
-        log "ERROR" "${COMPONENT}" "Failed to write temporary state file"
-        return 1
-    fi
-    
-    if ! mv "${STATE_FILE}.tmp" "${STATE_FILE}"; then
-        log "ERROR" "${COMPONENT}" "Failed to update state file"
-        return 1
-    fi
-    
-    log "INFO" "${COMPONENT}" "State updated to: ${new_state}"
-}
-
-# System state validation
-check_system_state() {
     local checks=(
         "! dpkg -l | grep -q '^.H'"  # No packages on hold
         "! dpkg -l | grep -q '^.F'"  # No failed installations
-        "! ps aux | grep -v grep | grep -q 'apt\|dpkg'"  # No package operations running
-        "systemctl is-system-running | grep -qE 'running|degraded'"  # System is operational
+        "! ps aux | grep -v grep | grep -q 'apt\|dpkg'"  # No package operations
+        "systemctl is-system-running | grep -qE 'running|degraded'"  # System operational
     )
 
     for check in "${checks[@]}"; do
         if ! eval "${check}"; then
-            log "ERROR" "${COMPONENT}" "System state check failed: ${check}"
+            log "ERROR" "${COMPONENT}" "System validation failed: ${check}"
             return 1
         fi
     done
+
+    return 0
 }
 
-# Error handling
-handle_error() {
-    local exit_code=$1
-    local line_number=$2
-    local source_file=$3
-    shift 3
-    local func_stack=("$@")
+# Process initial state
+process_initial_state() {
+    log "INFO" "${COMPONENT}" "Processing initial state"
     
-    log "ERROR" "${COMPONENT}" "Error in ${source_file} line ${line_number} (exit code: ${exit_code})"
-    log "ERROR" "${COMPONENT}" "Function stack: ${func_stack[*]}"
+    # Verify cleanup script
+    if [ ! -x "${SCRIPT_DIR}/pre_upgrade_cleanup.sh" ]; then
+        log "ERROR" "${COMPONENT}" "pre_upgrade_cleanup.sh not found or not executable"
+        return 1
+    fi
+
+    # Run cleanup with timeout
+    timeout 3600 "${SCRIPT_DIR}/pre_upgrade_cleanup.sh" || {
+        log "ERROR" "${COMPONENT}" "Cleanup script failed or timed out"
+        return 1
+    }
+
+    save_state "22.04" || return 1
+    setup_next_boot || return 1
     
-    # Attempt recovery
-    dpkg --configure -a || true
-    apt-get install -f -y || true
-    
-    release_lock
-    exit "${exit_code}"
+    log "INFO" "${COMPONENT}" "Initial preparation complete"
+    shutdown -r +1 "Rebooting for upgrade to 22.04"
 }
 
-# Environment initialization
-initialize_environment() {
-    export DEBIAN_FRONTEND=noninteractive
-    export APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=1
-    export NEEDRESTART_MODE=a
-    mkdir -p "${BASE_DIR}"
-    chmod 700 "${BASE_DIR}"
+# Process 22.04 upgrade
+process_2204_state() {
+    log "INFO" "${COMPONENT}" "Processing 22.04 upgrade"
+    
+    if perform_upgrade "22.04"; then
+        save_state "24.04" || return 1
+        log "INFO" "${COMPONENT}" "22.04 upgrade complete"
+        shutdown -r +1 "Rebooting for 24.04 upgrade"
+    else
+        log "ERROR" "${COMPONENT}" "Failed to upgrade to 22.04"
+        return 1
+    fi
 }
 
-# Rest of the script...
+# Process 24.04 upgrade
+process_2404_state() {
+    log "INFO" "${COMPONENT}" "Processing 24.04 upgrade"
+    
+    if perform_upgrade "24.04"; then
+        save_state "setup" || return 1
+        log "INFO" "${COMPONENT}" "24.04 upgrade complete"
+        shutdown -r +1 "Rebooting for post-upgrade setup"
+    else
+        log "ERROR" "${COMPONENT}" "Failed to upgrade to 24.04"
+        return 1
+    fi
+}
+
+# Process final setup
+process_setup_state() {
+    log "INFO" "${COMPONENT}" "Processing post-upgrade setup"
+    
+    if [ ! -x "${SCRIPT_DIR}/post_upgrade_setup.sh" ]; then
+        log "ERROR" "${COMPONENT}" "post_upgrade_setup.sh not found or not executable"
+        return 1
+    fi
+
+    "${SCRIPT_DIR}/post_upgrade_setup.sh" || return 1
+    
+    # Cleanup
+    rm -f "${STATE_FILE}"
+    systemctl disable ubuntu-upgrade.service
+    rm -f /etc/systemd/system/ubuntu-upgrade.service
+    
+    log "INFO" "${COMPONENT}" "Upgrade process completed"
+    shutdown -r +1 "Final reboot after setup"
+}
 
 # Main execution
 main() {
     # Initialize
-    acquire_lock
-    initialize_environment
+    initialize
+    acquire_lock || exit 1
+    trap cleanup EXIT
     
-    # Get and validate state
+    # Get current state
     current_state=$(get_state) || exit 1
+    log "INFO" "${COMPONENT}" "Starting upgrade process in state: ${current_state}"
     
-    # System checks
-    check_system_state || {
-        log "ERROR" "${COMPONENT}" "System is not in a clean state"
-        exit 1
-    }
+    # Validate system
+    validate_system || exit 1
     
     # Process state
     case "${current_state}" in
@@ -151,15 +132,30 @@ main() {
             process_setup_state
             ;;
         *)
-            log "ERROR" "${COMPONENT}" "Unknown state: ${current_state}"
+            log "ERROR" "${COMPONENT}" "Invalid state: ${current_state}"
             exit 1
             ;;
     esac
 }
 
-# Set up error handling
+# Error handler
+handle_error() {
+    local exit_code=$1
+    local line_number=$2
+    local source_file=$3
+    shift 3
+    local func_stack=("$@")
+    
+    log_stack_trace "ERROR" "${COMPONENT}" "Error in ${source_file} line ${line_number}"
+    
+    # Attempt recovery
+    dpkg --configure -a || true
+    apt-get install -f -y || true
+    
+    exit "${exit_code}"
+}
+
 trap 'handle_error $? ${LINENO} ${BASH_SOURCE} ${FUNCNAME[*]}' ERR
-trap 'release_lock' EXIT
 
 # Run main
 main "$@"
