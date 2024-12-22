@@ -73,4 +73,50 @@ setup_postgres() {
     fi
 }
 
-# Rest of the script remains the same...
+# Configure and start services
+setup_services() {
+    log "INFO" "${COMPONENT}" "Configuring services"
+    
+    systemctl daemon-reload
+    
+    # Services to enable and start
+    local services_enable=(
+        "bobe"
+        "mongod"
+        "nats-server"
+        "command-executor"
+        "auto-ssh"
+    )
+    
+    # Enable and start services
+    for service in "${services_enable[@]}"; do
+        log "INFO" "${COMPONENT}" "Enabling and starting ${service}"
+        systemctl enable "${service}.service" || log "WARN" "${COMPONENT}" "Failed to enable ${service}"
+        systemctl start "${service}.service" || log "WARN" "${COMPONENT}" "Failed to start ${service}"
+    done
+    
+    # Disable specific services
+    systemctl disable monit.service
+    systemctl stop monit.service
+}
+
+# Main execution
+main() {
+    log "INFO" "${COMPONENT}" "Starting post-upgrade setup"
+    
+    # Initialize
+    initialize
+    
+    # Run setup steps
+    install_packages
+    setup_postgres
+    setup_services
+    
+    log "INFO" "${COMPONENT}" "Post-upgrade setup completed"
+}
+
+# Set up error handling
+trap 'log "ERROR" "${COMPONENT}" "Script failed on line $LINENO"' ERR
+
+# Run main
+main "$@"
