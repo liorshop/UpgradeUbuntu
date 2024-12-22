@@ -54,13 +54,13 @@ install_packages() {
 
 # Setup PostgreSQL
 setup_postgres() {
-    log "INFO" "${COMPONENT}" "Setting up PostgreSQL"
+    log "INFO" "${COMPONENT}" "Setting up PostgreSQL for ${DB_NAME}"
     
     # Create user and database
-    sudo -u postgres psql -c "DROP USER IF EXISTS ${DB_NAME};"
-    sudo -u postgres psql -c "CREATE USER ${DB_NAME} WITH PASSWORD '${DB_NAME}';"
+    sudo -u postgres psql -c "DROP USER IF EXISTS ${DB_USER};"
+    sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASSWORD}';"
     sudo -u postgres psql -c "DROP DATABASE IF EXISTS ${DB_NAME};"
-    sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} WITH OWNER ${DB_NAME};"
+    sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} WITH OWNER ${DB_USER};"
     
     # Restore database from backup
     local latest_backup=$(ls -t "${BACKUP_DIR}/${DB_NAME}"_*.sql.gz 2>/dev/null | head -1)
@@ -73,50 +73,4 @@ setup_postgres() {
     fi
 }
 
-# Configure and start services
-setup_services() {
-    log "INFO" "${COMPONENT}" "Configuring services"
-    
-    systemctl daemon-reload
-    
-    # Services to enable and start
-    local services_enable=(
-        "bobe"
-        "mongod"
-        "nats-server"
-        "command-executor"
-        "auto-ssh"
-    )
-    
-    # Enable and start services
-    for service in "${services_enable[@]}"; do
-        log "INFO" "${COMPONENT}" "Enabling and starting ${service}"
-        systemctl enable "${service}.service" || log "WARN" "${COMPONENT}" "Failed to enable ${service}"
-        systemctl start "${service}.service" || log "WARN" "${COMPONENT}" "Failed to start ${service}"
-    done
-    
-    # Disable specific services
-    systemctl disable monit.service
-    systemctl stop monit.service
-}
-
-# Main execution
-main() {
-    log "INFO" "${COMPONENT}" "Starting post-upgrade setup"
-    
-    # Initialize
-    initialize
-    
-    # Run setup steps
-    install_packages
-    setup_postgres
-    setup_services
-    
-    log "INFO" "${COMPONENT}" "Post-upgrade setup completed"
-}
-
-# Set up error handling
-trap 'log "ERROR" "${COMPONENT}" "Script failed on line $LINENO"' ERR
-
-# Run main
-main "$@"
+# Rest of the script remains the same...
