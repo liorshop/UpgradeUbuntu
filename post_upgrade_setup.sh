@@ -1,25 +1,32 @@
 #!/bin/bash
 
-BASE_DIR="/update/upgrade"
-LOG_FILE="${BASE_DIR}/upgrade.log"
-DB_NAME="bobe"
+set -euo pipefail
 
-source $(dirname "$0")/logger.sh
+# Source required modules
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+source "${SCRIPT_DIR}/common.sh"
+source "${SCRIPT_DIR}/logger.sh"
+
+# Component name for logging
+COMPONENT="SETUP"
 
 # Install required packages
 install_packages() {
-    log "INFO" "Installing required packages"
+    log "INFO" "${COMPONENT}" "Installing required packages"
     
-    # Remove unnecessary packages
+    # Remove unnecessary packages first
+    log "INFO" "${COMPONENT}" "Removing unnecessary packages"
     DEBIAN_FRONTEND=noninteractive apt-get purge -y \
         snapd \
         cups* \
         libreoffice* || true
     
     # Install Java
-    apt install -y openjdk-17-jre-headless
+    log "INFO" "${COMPONENT}" "Installing OpenJDK"
+    apt-get install -y openjdk-17-jre-headless
     
     # Install MongoDB
+    log "INFO" "${COMPONENT}" "Setting up MongoDB repository"
     apt-get install -y gnupg curl
     curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | \
         gpg -o /usr/share/keyrings/mongodb-server-8.0.gpg \
@@ -29,74 +36,87 @@ install_packages() {
         tee /etc/apt/sources.list.d/mongodb-org-8.0.list
     
     # Install PostgreSQL
+    log "INFO" "${COMPONENT}" "Setting up PostgreSQL repository"
     sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
     
-    # Update and install
+    # Update and install packages
+    log "INFO" "${COMPONENT}" "Installing packages"
     apt-get update
     apt-get install -y mongodb-org postgresql-17 monit
+    
+    # Install Chrome
+    log "INFO" "${COMPONENT}" "Installing Chrome"
+    wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+    apt-get install -y ./google-chrome-stable_current_amd64.deb
+    rm -f google-chrome-stable_current_amd64.deb
 }
 
 # Setup PostgreSQL
 setup_postgres() {
-    log "INFO" "Setting up PostgreSQL"
+    log "INFO" "${COMPONENT}" "Setting up PostgreSQL"
     
     # Create user and database
+    sudo -u postgres psql -c "DROP USER IF EXISTS ${DB_NAME};"
     sudo -u postgres psql -c "CREATE USER ${DB_NAME} WITH PASSWORD '${DB_NAME}';"
-    sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} with OWNER ${DB_NAME};"
+    sudo -u postgres psql -c "DROP DATABASE IF EXISTS ${DB_NAME};"
+    sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} WITH OWNER ${DB_NAME};"
     
     # Restore database from backup
-    local latest_backup=$(ls -t ${BASE_DIR}/backups/${DB_NAME}_*.sql.gz | head -1)
-    if [ -f "${latest_backup}" ]; then
-        log "INFO" "Restoring database from ${latest_backup}"
-        gunzip -c "${latest_backup}" | sudo -u postgres psql ${DB_NAME}
-        log "INFO" "Database restored successfully"
+    local latest_backup=$(ls -t "${BACKUP_DIR}/${DB_NAME}"_*.sql.gz 2>/dev/null | head -1)
+    if [ -n "${latest_backup}" ]; then
+        log "INFO" "${COMPONENT}" "Restoring database from ${latest_backup}"
+        gunzip -c "${latest_backup}" | sudo -u postgres psql "${DB_NAME}"
+        log "INFO" "${COMPONENT}" "Database restored successfully"
     else
-        log "ERROR" "No database backup found"
-        exit 1
+        log "WARN" "${COMPONENT}" "No database backup found to restore"
     fi
 }
 
 # Configure and start services
 setup_services() {
-    log "INFO" "Configuring services"
+    log "INFO" "${COMPONENT}" "Configuring services"
     
     systemctl daemon-reload
     
+    # Services to enable and start
+    local services_enable=(
+        "bobe"
+        "mongod"
+        "nats-server"
+        "command-executor"
+        "auto-ssh"
+    )
+    
     # Enable and start services
-    services_to_enable=("bobe" "mongod" "nats-server" "command-executor" "auto-ssh")
-    for service in "${services_to_enable[@]}"; do
-        log "INFO" "Enabling and starting ${service}"
-        systemctl enable "${service}.service" --now || log "ERROR" "Failed to enable ${service}"
+    for service in "${services_enable[@]}"; do
+        log "INFO" "${COMPONENT}" "Enabling and starting ${service}"
+        systemctl enable "${service}.service" || log "WARN" "${COMPONENT}" "Failed to enable ${service}"
+        systemctl start "${service}.service" || log "WARN" "${COMPONENT}" "Failed to start ${service}"
     done
     
     # Disable specific services
-    systemctl disable monit.service --now || true
+    systemctl disable monit.service
+    systemctl stop monit.service
 }
 
-# Install Chrome
-install_chrome() {
-    log "INFO" "Installing Chrome"
-    
-    wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-    apt install -y ./google-chrome-stable_current_amd64.deb
-    rm -f google-chrome-stable_current_amd64.deb
-}
-
+# Main execution
 main() {
-    if [[ $EUID -ne 0 ]]; then
-        echo "This script must be run as root"
-        exit 1
-    fi
+    log "INFO" "${COMPONENT}" "Starting post-upgrade setup"
     
-    log "INFO" "Starting post-upgrade setup"
+    # Initialize
+    initialize
     
+    # Run setup steps
     install_packages
     setup_postgres
     setup_services
-    install_chrome
     
-    log "INFO" "Post-upgrade setup completed"
+    log "INFO" "${COMPONENT}" "Post-upgrade setup completed"
 }
 
+# Set up error handling
+trap 'log "ERROR" "${COMPONENT}" "Script failed on line $LINENO"' ERR
+
+# Run main
 main "$@"
