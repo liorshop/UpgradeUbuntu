@@ -2,61 +2,37 @@
 
 Automated upgrade scripts for Ubuntu LTS versions (20.04 -> 22.04 -> 24.04)
 
-## Active Script Components
+## Core Components
 
-- `upgrade_manager.sh` - **Main Entry Point**
-  - Controls the entire upgrade process
-  - Handles state management and reboots
-  - Coordinates all other scripts
+### Main Scripts
+- `upgrade_manager.sh` - Main controller
+- `pre_upgrade_cleanup.sh` - Pre-upgrade cleanup
+- `post_upgrade_setup.sh` - Post-upgrade setup
 
-- `pre_upgrade_cleanup.sh`
-  - Performs database backup (PostgreSQL - bobe database)
-  - Removes unnecessary packages
-  - Cleans up system services
-  - Ensures auto-ssh remains active
-
-- `logger.sh`
-  - Enterprise-grade logging
-  - Log rotation
-  - Multi-level logging (INFO, ERROR, DEBUG, STAT)
-
-- `monitor.sh`
-  - System resource monitoring
-  - Service health checks
-  - Performance tracking
-
-- `common.sh`
-  - Shared functions and variables
-  - Common utilities
-
-## Legacy Files (Reference Only)
-These files remain in the repository for reference but are not used in the upgrade process:
-- `phase2_upgrade.sh` - Original phase 2 script (functionality now in upgrade_manager.sh)
-- `main.sh` - Original main script (replaced by upgrade_manager.sh)
-
-## Prerequisites
-
-- Ubuntu 20.04 LTS
-- Root access
-- Minimum 10GB free space
-- Stable internet connection
+### Support Modules
+- `common.sh` - Shared configurations
+- `logger.sh` - Enterprise logging system
+- `state_manager.sh` - State management
+- `monitor.sh` - System monitoring
 
 ## Pre-upgrade Actions
 
-The script will automatically:
-1. Backup PostgreSQL database 'bobe'
+Before starting the upgrade, the script will:
+1. Back up PostgreSQL database 'bobe'
+   - Verifies backup success
+   - Stops if backup fails
+
 2. Remove packages:
    - postgresql*
    - monit*
    - mongodb*
    - openjdk*
    - cups*
-   - printer-driver-*
-   - hplip*
+   - snap*
 
 3. Manage services:
    - Stops and disables most services
-   - Preserves auto-ssh service (keeps running)
+   - Preserves auto-ssh service
    - Cleanups service configurations
 
 ## Installation
@@ -69,18 +45,19 @@ chmod +x *.sh
 
 ## Usage
 
-Start the upgrade process:
+Start the upgrade:
 ```bash
 sudo /update/upgrade/upgrade_manager.sh
 ```
 
 ### Process Flow
-1. Pre-upgrade cleanup
-2. System preparation
-3. Upgrade to 22.04
-4. System verification
-5. Upgrade to 24.04
-6. Final verification
+1. Pre-upgrade verification
+2. Database backup (required)
+3. System cleanup
+4. Upgrade to 22.04
+5. System verification
+6. Upgrade to 24.04
+7. Final setup
 
 ### Logs
 - Main log: `/update/upgrade/logs/upgrade.log`
@@ -91,8 +68,42 @@ sudo /update/upgrade/upgrade_manager.sh
 ### Backups
 Database backups are stored in `/update/upgrade/backups/`
 
+## Safety Features
+
+1. Backup Verification
+   - Checks backup existence
+   - Verifies backup size
+   - Stops if backup fails
+
+2. Service Protection
+   - Preserves critical services
+   - Maintains SSH access
+   - Handles service dependencies
+
+3. Error Recovery
+   - Automatic cleanup on failure
+   - State preservation
+   - Service restoration
+
+## Enterprise Features
+
+1. Comprehensive Logging
+   - Multi-level logging
+   - Error tracking
+   - Performance monitoring
+
+2. State Management
+   - Atomic state updates
+   - Progress tracking
+   - Recovery points
+
+3. Process Control
+   - Lock management
+   - Resource monitoring
+   - Service orchestration
+
 ## Notes
 - The upgrade process is fully automated and unattended
 - Multiple reboots will occur automatically
-- auto-ssh service remains active throughout the process
-- All operations are logged for tracking and debugging
+- auto-ssh service remains active throughout
+- All operations are logged for audit
