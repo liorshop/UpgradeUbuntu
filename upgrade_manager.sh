@@ -15,14 +15,14 @@ init_logging
 
 # Get current state
 get_state() {
-    local current_state
+    local state
     if [ -f "${STATE_FILE}" ]; then
-        current_state=$(cat "${STATE_FILE}")
+        state=$(cat "${STATE_FILE}")
     else
-        current_state="initial"
+        state="initial"
     fi
-    log "INFO" "${COMPONENT}" "Current system state: ${current_state}"
-    echo "${current_state}"
+    log "INFO" "${COMPONENT}" "Current system state: ${state}"
+    echo "${state}"
 }
 
 # Save state
