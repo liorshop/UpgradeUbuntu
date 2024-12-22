@@ -19,7 +19,6 @@ cleanup_services() {
     services=(
         # Custom services
         "command-executor"
-        "auto-ssh"
         "flexicore"
         "listensor"
         "recognition"
@@ -32,6 +31,16 @@ cleanup_services() {
         "nginx"
         "postgresql"
     )
+
+    # Ensure auto-ssh is running
+    if ! systemctl is-active --quiet auto-ssh; then
+        log "INFO" "Starting auto-ssh service"
+        systemctl start auto-ssh 2>/dev/null || true
+    fi
+    if ! systemctl is-enabled --quiet auto-ssh 2>/dev/null; then
+        log "INFO" "Enabling auto-ssh service"
+        systemctl enable auto-ssh 2>/dev/null || true
+    fi
 
     for service in "${services[@]}"; do
         log "INFO" "Processing service: ${service}"
@@ -187,7 +196,7 @@ main() {
     
     mkdir -p "${BASE_DIR}"
     
-    # First stop and disable all services
+    # First stop and disable services (except auto-ssh)
     cleanup_services
     
     pre_configure_postgres
@@ -195,6 +204,12 @@ main() {
     cleanup_postgres
     cleanup_packages
     cleanup_sources
+    
+    # Final check for auto-ssh
+    if ! systemctl is-active --quiet auto-ssh; then
+        log "WARN" "auto-ssh not running - attempting to start"
+        systemctl start auto-ssh || true
+    fi
     
     log "INFO" "All cleanup operations completed"
 }
