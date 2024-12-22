@@ -12,7 +12,53 @@ log() {
     echo "${timestamp} [${level}] ${message}" | tee -a "${LOG_FILE}"
 }
 
-# Pre-configure PostgreSQL prompts
+cleanup_services() {
+    log "INFO" "Starting services cleanup"
+    
+    # List of services to stop and disable
+    services=(
+        # Custom services
+        "command-executor"
+        "auto-ssh"
+        "flexicore"
+        "listensor"
+        "recognition"
+        # System services
+        "cups"
+        "mongod"
+        "monit"
+        "snapd"
+        "apache2"
+        "nginx"
+        "postgresql"
+    )
+
+    for service in "${services[@]}"; do
+        log "INFO" "Processing service: ${service}"
+        
+        # Check if service exists
+        if systemctl list-unit-files | grep -q "${service}"; then
+            # Stop service
+            if systemctl is-active --quiet ${service}; then
+                log "INFO" "Stopping service: ${service}"
+                systemctl stop ${service} 2>/dev/null || true
+            fi
+            
+            # Disable service
+            if systemctl is-enabled --quiet ${service} 2>/dev/null; then
+                log "INFO" "Disabling service: ${service}"
+                systemctl disable ${service} 2>/dev/null || true
+            fi
+            
+            # Mask service to prevent automatic start
+            log "INFO" "Masking service: ${service}"
+            systemctl mask ${service} 2>/dev/null || true
+        else
+            log "INFO" "Service ${service} not found - skipping"
+        fi
+    done
+}
+
 pre_configure_postgres() {
     log "INFO" "Pre-configuring PostgreSQL removal options"
     echo "postgresql-common postgresql-common/purge-data boolean true" | debconf-set-selections
@@ -72,25 +118,40 @@ cleanup_postgres() {
 cleanup_packages() {
     log "INFO" "Starting package cleanup"
     
-    services=("mongod" "monit")
-    for service in "${services[@]}"; do
-        systemctl stop ${service} 2>/dev/null || true
-        systemctl disable ${service} 2>/dev/null || true
-    done
-    
     packages=(
         "monit*"
         "mongodb*"
         "mongo-tools"
         "openjdk*"
+        "cups*"
+        "printer-driver-*"
+        "hplip*"
     )
     
+    # Log initial disk space
+    initial_space=$(df -h / | awk 'NR==2 {print $4}')
+    log "INFO" "Initial free space: ${initial_space}"
+    
     for pkg in "${packages[@]}"; do
-        DEBIAN_FRONTEND=noninteractive apt-get purge -y ${pkg} || true
+        # Get list of packages matching pattern
+        matching_pkgs=$(dpkg -l | grep "^ii" | grep "${pkg}" | awk '{print $2}')
+        
+        if [ ! -z "${matching_pkgs}" ]; then
+            log "INFO" "Removing packages matching: ${pkg}"
+            for match in ${matching_pkgs}; do
+                pkg_size=$(dpkg-query -W -f='${Installed-Size}\n' ${match} 2>/dev/null || echo "0")
+                log "INFO" "Removing: ${match} (${pkg_size} KB)"
+                DEBIAN_FRONTEND=noninteractive apt-get purge -y ${match} || true
+            done
+        fi
     done
     
     apt-get autoremove -y || true
     apt-get clean
+    
+    # Log space freed
+    final_space=$(df -h / | awk 'NR==2 {print $4}')
+    log "INFO" "Final free space: ${final_space}"
 }
 
 cleanup_sources() {
@@ -125,6 +186,10 @@ main() {
     fi
     
     mkdir -p "${BASE_DIR}"
+    
+    # First stop and disable all services
+    cleanup_services
+    
     pre_configure_postgres
     backup_postgres
     cleanup_postgres
