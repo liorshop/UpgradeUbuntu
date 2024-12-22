@@ -1,15 +1,20 @@
 #!/bin/bash
 
-set -euo pipefail
-
 BASE_DIR="/update/upgrade"
 LOG_FILE="${BASE_DIR}/upgrade.log"
+DB_NAME="bobe"
 
-source $(dirname "$0")/logger.sh
+log() {
+    local level=$1
+    shift
+    local message="$*"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "${timestamp} [${level}] ${message}" | tee -a "${LOG_FILE}"
+}
 
 # Pre-configure all PostgreSQL-related prompts
 pre_configure_postgres() {
-    log "INFO" "CLEANUP" "Pre-configuring PostgreSQL removal options"
+    log "INFO" "Pre-configuring PostgreSQL removal options"
     
     # Set all possible PostgreSQL prompts to non-interactive
     echo "postgresql-common postgresql-common/purge-data boolean true" | debconf-set-selections
@@ -28,25 +33,21 @@ EOF
 }
 
 backup_postgres() {
-    log "INFO" "CLEANUP" "Starting PostgreSQL backup"
-    
     if command -v pg_dump >/dev/null; then
         mkdir -p "${BASE_DIR}/backups"
-        BACKUP_FILE="${BASE_DIR}/backups/bobe_$(date +%Y%m%d_%H%M%S).sql"
-        
-        if sudo -u postgres pg_dump bobe > "${BACKUP_FILE}" 2>/dev/null; then
+        BACKUP_FILE="${BASE_DIR}/backups/${DB_NAME}_$(date +%Y%m%d_%H%M%S).sql"
+        if sudo -u postgres pg_dump ${DB_NAME} > "${BACKUP_FILE}"; then
             gzip -c "${BACKUP_FILE}" > "${BACKUP_FILE}.gz"
-            log "INFO" "CLEANUP" "Database backup completed: ${BACKUP_FILE}.gz"
+            log "INFO" "Database backup completed: ${BACKUP_FILE}.gz"
         else
-            log "WARN" "CLEANUP" "Database backup failed - continuing anyway"
+            log "ERROR" "Database backup failed"
+            exit 1
         fi
-    else
-        log "WARN" "CLEANUP" "pg_dump not found - PostgreSQL might not be installed"
     fi
 }
 
 cleanup_postgres() {
-    log "INFO" "CLEANUP" "Starting PostgreSQL cleanup"
+    log "INFO" "Starting PostgreSQL cleanup"
     
     # Stop PostgreSQL services first
     systemctl stop postgresql* || true
@@ -81,7 +82,7 @@ cleanup_postgres() {
 }
 
 cleanup_packages() {
-    log "INFO" "CLEANUP" "Starting package cleanup"
+    log "INFO" "Starting package cleanup"
     
     services=("mongod" "monit")
     for service in "${services[@]}"; do
@@ -105,7 +106,7 @@ cleanup_packages() {
 }
 
 cleanup_sources() {
-    log "INFO" "CLEANUP" "Cleaning up package sources"
+    log "INFO" "Cleaning up package sources"
     
     # Remove repository configurations
     rm -f /etc/apt/sources.list.d/pgdg*.list
@@ -152,7 +153,7 @@ main() {
     cleanup_packages
     cleanup_sources
     
-    log "INFO" "CLEANUP" "All cleanup operations completed"
+    log "INFO" "All cleanup operations completed"
 }
 
 main "$@"
