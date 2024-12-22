@@ -1,69 +1,65 @@
 # Ubuntu LTS Upgrade Scripts
 
-This repository contains a set of scripts to automate the upgrade process for Ubuntu LTS versions. The upgrade process is divided into multiple phases to handle system reboots and ensure a reliable upgrade.
-
-## Important Note About LTS Upgrades
-
-Ubuntu LTS upgrades must be performed sequentially:
-- To upgrade from 20.04 to 24.04, you must first upgrade to 22.04
-- After reaching 22.04, you can then upgrade to 24.04
-
-This script package handles the 20.04 to 22.04 upgrade. For 24.04, you'll need to run the upgrade process again after successfully reaching 22.04.
+Automated upgrade scripts for Ubuntu LTS versions (20.04 -> 22.04 -> 24.04)
 
 ## Features
 
-- Fully unattended upgrade process
-- Automatic handling of all prompts and configurations
-- Phased upgrade process with automatic resume after reboots
+- Fully automated, unattended upgrade process
+- Pre-upgrade cleanup and database backup
+- Handles multiple reboots automatically
 - Comprehensive error handling and logging
-- System health checks before upgrade
-- Automatic backup of critical configurations
-- Post-upgrade verification and cleanup
+- System verification at each step
+- Automatic service and package management
 
 ## Prerequisites
 
-- Ubuntu 20.04 LTS system
+- Ubuntu 20.04 LTS
 - Root access
-- At least 10GB of free disk space
+- Minimum 10GB free space
 - Stable internet connection
+
+## Pre-upgrade Actions
+
+The script will automatically:
+1. Backup PostgreSQL database 'bobe'
+2. Remove specified packages:
+   - postgresql*
+   - monit*
+   - mongodb*
+   - openjdk*
+3. Clean up related source lists
+4. Prepare system for upgrade
 
 ## Installation
 
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/liorshop/UpgradeUbuntu.git /update/upgrade
-   ```
-
-2. Make scripts executable:
-   ```bash
-   chmod +x /update/upgrade/*.sh
-   ```
+```bash
+git clone https://github.com/liorshop/UpgradeUbuntu.git /update/upgrade
+cd /update/upgrade
+chmod +x *.sh
+```
 
 ## Usage
 
-Start the upgrade process by running:
+Start the upgrade process:
 ```bash
-sudo /update/upgrade/main.sh
+sudo ./main.sh
 ```
 
-The upgrade process will:
-1. Prepare the system and perform initial checks
-2. Configure for unattended upgrade
-3. Upgrade the system to Ubuntu 22.04
-4. Perform post-upgrade cleanup and verification
+### Logs
 
-Logs are written to `/update/upgrade/upgrade.log`
+All operations are logged to `/update/upgrade/upgrade.log`
 
-## Error Handling
+### Backups
 
-If an error occurs during the upgrade process:
-1. The error will be logged to the upgrade log file
-2. The script will terminate with an appropriate error message
-3. The system will remain in a consistent state
+Database backups are stored in `/update/upgrade/backups/`
 
-## Next Steps After 22.04
+## Safety Features
 
-After successfully upgrading to 22.04, wait until Ubuntu 24.04.1 is released (typically a few months after 24.04) before upgrading to 24.04. This ensures a more stable upgrade path.
+- Automatic rollback on failure
+- Service state verification
+- Package dependency checks
+- Database backup verification
+- Disk space monitoring
 
 ## License
 
