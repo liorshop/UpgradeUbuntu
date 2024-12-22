@@ -15,8 +15,10 @@ MAIN_LOG="${LOG_DIR}/upgrade.log"
 ERROR_LOG="${LOG_DIR}/error.log"
 DEBUG_LOG="${LOG_DIR}/debug.log"
 
-# Database settings
+# Database configurations
 DB_NAME="bobe"
+DB_USER="${DB_NAME}"
+DB_PASSWORD="${DB_NAME}"
 
 # Initialize directories
 initialize_directories() {
