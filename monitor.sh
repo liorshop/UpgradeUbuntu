@@ -54,11 +54,21 @@ check_processes() {
     done
 }
 
-# Network connectivity check
+# Network connectivity check with recovery attempt
 check_network() {
     local component="MONITOR"
     local targets=("archive.ubuntu.com" "security.ubuntu.com")
     local failed=0
+    
+    # First check if networking service is running
+    if ! systemctl is-active --quiet networking; then
+        log "WARN" "${component}" "Attempting to restart networking service"
+        systemctl restart networking || {
+            log "ERROR" "${component}" "Failed to restart networking service"
+            return 1
+        }
+        sleep 10  # Wait for network to stabilize
+    fi
     
     for target in "${targets[@]}"; do
         if ! ping -c 1 -W 5 ${target} >/dev/null 2>&1; then
@@ -70,7 +80,7 @@ check_network() {
     return ${failed}
 }
 
-# Service health monitoring
+# Service health monitoring with recovery attempts
 check_services() {
     local component="MONITOR"
     local critical_services=("systemd" "networking" "ssh")
@@ -79,7 +89,24 @@ check_services() {
     for service in "${critical_services[@]}"; do
         if ! systemctl is-active --quiet ${service}; then
             log "ERROR" "${component}" "Critical service ${service} is not running"
-            failed=$((failed + 1))
+            
+            # Attempt service recovery
+            log "WARN" "${component}" "Attempting to restart ${service}"
+            if [ "${service}" = "systemd" ]; then
+                # Special handling for systemd
+                if ! systemctl daemon-reexec; then
+                    log "ERROR" "${component}" "Failed to re-execute systemd"
+                    failed=$((failed + 1))
+                fi
+            else
+                # Standard service restart
+                if ! systemctl restart ${service}; then
+                    log "ERROR" "${component}" "Failed to restart ${service}"
+                    failed=$((failed + 1))
+                else
+                    log "INFO" "${component}" "Successfully restarted ${service}"
+                fi
+            fi
         fi
     done
     
