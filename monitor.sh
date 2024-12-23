@@ -8,6 +8,8 @@ MONITORING_INTERVAL=300  # 5 minutes
 ALERT_DISK_THRESHOLD=85  # Alert if disk usage > 85%
 ALERT_MEM_THRESHOLD=90   # Alert if memory usage > 90%
 ALERT_LOAD_THRESHOLD=8   # Alert if load average > 8
+MAX_RESTART_ATTEMPTS=3   # Maximum number of restart attempts
+RESTART_DELAY=30        # Delay between restart attempts
 
 # System metrics collection
 collect_metrics() {
@@ -54,6 +56,43 @@ check_processes() {
     done
 }
 
+# Attempt to restart a service with retries
+restart_service_with_retry() {
+    local service="$1"
+    local component="MONITOR"
+    local attempt=1
+    
+    while [ $attempt -le $MAX_RESTART_ATTEMPTS ]; do
+        log "WARN" "${component}" "Attempting to restart ${service} (attempt ${attempt}/${MAX_RESTART_ATTEMPTS})"
+        
+        if [ "${service}" = "systemd" ]; then
+            # Special handling for systemd
+            if systemctl daemon-reexec; then
+                log "INFO" "${component}" "Successfully re-executed systemd"
+                return 0
+            fi
+        else
+            # For other services, try standard restart
+            if systemctl restart "${service}"; then
+                # Verify service is actually running after restart
+                sleep 5  # Wait for service to stabilize
+                if systemctl is-active --quiet "${service}"; then
+                    log "INFO" "${component}" "Successfully restarted ${service}"
+                    return 0
+                fi
+            fi
+        fi
+        
+        log "ERROR" "${component}" "Failed to restart ${service} on attempt ${attempt}"
+        
+        # Wait before next attempt with increased delay
+        sleep $((RESTART_DELAY * attempt))
+        attempt=$((attempt + 1))
+    done
+    
+    return 1
+}
+
 # Network connectivity check with recovery attempt
 check_network() {
     local component="MONITOR"
@@ -62,9 +101,8 @@ check_network() {
     
     # First check if networking service is running
     if ! systemctl is-active --quiet networking; then
-        log "WARN" "${component}" "Attempting to restart networking service"
-        systemctl restart networking || {
-            log "ERROR" "${component}" "Failed to restart networking service"
+        restart_service_with_retry "networking" || {
+            log "ERROR" "${component}" "Failed to restore networking service"
             return 1
         }
         sleep 10  # Wait for network to stabilize
@@ -76,6 +114,22 @@ check_network() {
             failed=$((failed + 1))
         fi
     done
+    
+    if [ ${failed} -gt 0 ]; then
+        # If ping fails, try to restart networking again
+        log "WARN" "${component}" "Network connectivity issues detected, attempting recovery"
+        systemctl restart networking
+        sleep 10
+        
+        # Check connectivity again
+        failed=0
+        for target in "${targets[@]}"; do
+            if ! ping -c 1 -W 5 ${target} >/dev/null 2>&1; then
+                log "ERROR" "${component}" "Network connectivity still failed to ${target} after recovery attempt"
+                failed=$((failed + 1))
+            fi
+        done
+    fi
     
     return ${failed}
 }
@@ -90,21 +144,20 @@ check_services() {
         if ! systemctl is-active --quiet ${service}; then
             log "ERROR" "${component}" "Critical service ${service} is not running"
             
-            # Attempt service recovery
-            log "WARN" "${component}" "Attempting to restart ${service}"
-            if [ "${service}" = "systemd" ]; then
-                # Special handling for systemd
-                if ! systemctl daemon-reexec; then
-                    log "ERROR" "${component}" "Failed to re-execute systemd"
-                    failed=$((failed + 1))
-                fi
-            else
-                # Standard service restart
-                if ! systemctl restart ${service}; then
-                    log "ERROR" "${component}" "Failed to restart ${service}"
-                    failed=$((failed + 1))
-                else
-                    log "INFO" "${component}" "Successfully restarted ${service}"
+            if ! restart_service_with_retry "${service}"; then
+                log "ERROR" "${component}" "Failed to recover ${service} after ${MAX_RESTART_ATTEMPTS} attempts"
+                failed=$((failed + 1))
+                
+                # For critical services, try more aggressive recovery
+                if [ "${service}" = "systemd" ] || [ "${service}" = "networking" ]; then
+                    log "WARN" "${component}" "Attempting aggressive recovery for ${service}"
+                    systemctl reset-failed ${service}
+                    systemctl stop ${service} 2>/dev/null || true
+                    sleep 5
+                    systemctl start ${service} || {
+                        log "ERROR" "${component}" "Aggressive recovery failed for ${service}"
+                        ((failed++))
+                    }
                 fi
             fi
         fi
