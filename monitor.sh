@@ -4,12 +4,12 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/logger.sh"
 
 # Monitoring configuration
-MONITORING_INTERVAL=300  # 5 minutes
+MONITORING_INTERVAL=60  # Reduced to 1 minute for faster recovery
 ALERT_DISK_THRESHOLD=85  # Alert if disk usage > 85%
 ALERT_MEM_THRESHOLD=90   # Alert if memory usage > 90%
 ALERT_LOAD_THRESHOLD=8   # Alert if load average > 8
-MAX_RESTART_ATTEMPTS=3   # Maximum number of restart attempts
-RESTART_DELAY=30        # Delay between restart attempts
+MAX_RESTART_ATTEMPTS=5   # Increased restart attempts
+RESTART_DELAY=10        # Shorter initial delay for faster recovery
 
 # System metrics collection
 collect_metrics() {
@@ -23,69 +23,96 @@ collect_metrics() {
     log "STAT" "MONITOR" "METRICS cpu_load=${cpu_load},mem_used=${mem_percent}%,disk_used=${disk_percent}%"
     
     # Check thresholds
+    local failed=0
+    
     if [ ${disk_percent} -gt ${ALERT_DISK_THRESHOLD} ]; then
         log "ERROR" "MONITOR" "Disk usage critical: ${disk_percent}%"
-        return 1
+        failed=1
     fi
     
     if [ ${mem_percent} -gt ${ALERT_MEM_THRESHOLD} ]; then
         log "ERROR" "MONITOR" "Memory usage critical: ${mem_percent}%"
-        return 1
+        failed=1
     fi
     
     if (( $(echo "${cpu_load} > ${ALERT_LOAD_THRESHOLD}" | bc -l) )); then
         log "ERROR" "MONITOR" "System load critical: ${cpu_load}"
+        failed=1
+    fi
+    
+    return $failed
+}
+
+# Aggressive service recovery
+aggressive_service_recovery() {
+    local service="$1"
+    local component="MONITOR"
+    
+    log "WARN" "$component" "Performing aggressive recovery for $service"
+    
+    # Stop and cleanup
+    systemctl stop "$service" 2>/dev/null || true
+    systemctl reset-failed "$service" 2>/dev/null || true
+    rm -f "/var/run/$service.pid" 2>/dev/null || true
+    
+    # For systemd, additional cleanup
+    if [ "$service" = "systemd" ]; then
+        # Backup and cleanup systemd state
+        cp -a /run/systemd/system /run/systemd/system.bak
+        systemctl daemon-reexec
+        if systemctl is-active --quiet systemd; then
+            rm -rf /run/systemd/system.bak
+            return 0
+        fi
+        mv /run/systemd/system.bak /run/systemd/system
         return 1
     fi
     
-    return 0
-}
-
-# Process monitoring
-check_processes() {
-    local component="MONITOR"
-    local critical_processes=("apt" "dpkg" "do-release-upgrade")
+    # For networking, reset interfaces
+    if [ "$service" = "networking" ]; then
+        ip link set dev eth0 down 2>/dev/null || true
+        ip link set dev eth0 up 2>/dev/null || true
+        sleep 2
+    fi
     
-    for proc in "${critical_processes[@]}"; do
-        if pgrep -f "${proc}" >/dev/null; then
-            local pid=$(pgrep -f "${proc}")
-            local cpu=$(ps -p ${pid} -o %cpu= 2>/dev/null || echo "N/A")
-            local mem=$(ps -p ${pid} -o %mem= 2>/dev/null || echo "N/A")
-            log "DEBUG" "${component}" "Process ${proc} running (PID: ${pid}, CPU: ${cpu}%, MEM: ${mem}%)"
-        fi
-    done
+    # Try to start the service
+    systemctl start "$service"
+    sleep 5
+    
+    # Verify service status
+    if systemctl is-active --quiet "$service"; then
+        log "INFO" "$component" "Aggressive recovery successful for $service"
+        return 0
+    else
+        log "ERROR" "$component" "Aggressive recovery failed for $service"
+        return 1
+    fi
 }
 
-# Attempt to restart a service with retries
+# Service restart with retry mechanism
 restart_service_with_retry() {
     local service="$1"
     local component="MONITOR"
     local attempt=1
     
     while [ $attempt -le $MAX_RESTART_ATTEMPTS ]; do
-        log "WARN" "${component}" "Attempting to restart ${service} (attempt ${attempt}/${MAX_RESTART_ATTEMPTS})"
+        log "WARN" "$component" "Attempting to restart $service (attempt $attempt/$MAX_RESTART_ATTEMPTS)"
         
-        if [ "${service}" = "systemd" ]; then
-            # Special handling for systemd
-            if systemctl daemon-reexec; then
-                log "INFO" "${component}" "Successfully re-executed systemd"
+        if systemctl restart "$service"; then
+            sleep 5
+            if systemctl is-active --quiet "$service"; then
+                log "INFO" "$component" "Successfully restarted $service"
                 return 0
-            fi
-        else
-            # For other services, try standard restart
-            if systemctl restart "${service}"; then
-                # Verify service is actually running after restart
-                sleep 5  # Wait for service to stabilize
-                if systemctl is-active --quiet "${service}"; then
-                    log "INFO" "${component}" "Successfully restarted ${service}"
-                    return 0
-                fi
             fi
         fi
         
-        log "ERROR" "${component}" "Failed to restart ${service} on attempt ${attempt}"
+        log "ERROR" "$component" "Failed to restart $service on attempt $attempt"
         
-        # Wait before next attempt with increased delay
+        if [ $attempt -eq $((MAX_RESTART_ATTEMPTS - 1)) ]; then
+            # Try aggressive recovery on second-to-last attempt
+            aggressive_service_recovery "$service" && return 0
+        fi
+        
         sleep $((RESTART_DELAY * attempt))
         attempt=$((attempt + 1))
     done
@@ -93,48 +120,52 @@ restart_service_with_retry() {
     return 1
 }
 
-# Network connectivity check with recovery attempt
+# Network connectivity check with recovery
 check_network() {
     local component="MONITOR"
     local targets=("archive.ubuntu.com" "security.ubuntu.com")
     local failed=0
     
-    # First check if networking service is running
+    # First ensure DNS resolution is working
+    if ! host archive.ubuntu.com >/dev/null 2>&1; then
+        log "WARN" "$component" "DNS resolution failed, attempting to restart systemd-resolved"
+        systemctl restart systemd-resolved
+        sleep 5
+    fi
+    
+    # Check if networking service is running
     if ! systemctl is-active --quiet networking; then
         restart_service_with_retry "networking" || {
-            log "ERROR" "${component}" "Failed to restore networking service"
+            log "ERROR" "$component" "Failed to restore networking service"
             return 1
         }
-        sleep 10  # Wait for network to stabilize
+        sleep 10
     fi
     
+    # Check connectivity
     for target in "${targets[@]}"; do
         if ! ping -c 1 -W 5 ${target} >/dev/null 2>&1; then
-            log "ERROR" "${component}" "Network connectivity failed to ${target}"
+            log "ERROR" "$component" "Network connectivity failed to ${target}"
             failed=$((failed + 1))
+            
+            # On first failure, try to recover networking
+            if [ $failed -eq 1 ]; then
+                log "WARN" "$component" "Attempting network recovery"
+                aggressive_service_recovery "networking"
+                sleep 10
+                # Retry ping after recovery
+                if ping -c 1 -W 5 ${target} >/dev/null 2>&1; then
+                    log "INFO" "$component" "Network connectivity restored to ${target}"
+                    failed=$((failed - 1))
+                fi
+            fi
         fi
     done
-    
-    if [ ${failed} -gt 0 ]; then
-        # If ping fails, try to restart networking again
-        log "WARN" "${component}" "Network connectivity issues detected, attempting recovery"
-        systemctl restart networking
-        sleep 10
-        
-        # Check connectivity again
-        failed=0
-        for target in "${targets[@]}"; do
-            if ! ping -c 1 -W 5 ${target} >/dev/null 2>&1; then
-                log "ERROR" "${component}" "Network connectivity still failed to ${target} after recovery attempt"
-                failed=$((failed + 1))
-            fi
-        done
-    fi
     
     return ${failed}
 }
 
-# Service health monitoring with recovery attempts
+# Service health monitoring
 check_services() {
     local component="MONITOR"
     local critical_services=("systemd" "networking" "ssh")
@@ -142,23 +173,11 @@ check_services() {
     
     for service in "${critical_services[@]}"; do
         if ! systemctl is-active --quiet ${service}; then
-            log "ERROR" "${component}" "Critical service ${service} is not running"
+            log "ERROR" "$component" "Critical service ${service} is not running"
             
             if ! restart_service_with_retry "${service}"; then
-                log "ERROR" "${component}" "Failed to recover ${service} after ${MAX_RESTART_ATTEMPTS} attempts"
+                log "ERROR" "$component" "Failed to recover ${service} after ${MAX_RESTART_ATTEMPTS} attempts"
                 failed=$((failed + 1))
-                
-                # For critical services, try more aggressive recovery
-                if [ "${service}" = "systemd" ] || [ "${service}" = "networking" ]; then
-                    log "WARN" "${component}" "Attempting aggressive recovery for ${service}"
-                    systemctl reset-failed ${service}
-                    systemctl stop ${service} 2>/dev/null || true
-                    sleep 5
-                    systemctl start ${service} || {
-                        log "ERROR" "${component}" "Aggressive recovery failed for ${service}"
-                        ((failed++))
-                    }
-                fi
             fi
         fi
     done
@@ -169,13 +188,18 @@ check_services() {
 # Main monitoring loop
 monitor_loop() {
     local component="MONITOR"
-    log "INFO" "${component}" "Starting system monitoring"
+    log "INFO" "$component" "Starting system monitoring"
     
     while true; do
-        collect_metrics || log "WARN" "${component}" "Metrics collection failed"
-        check_processes
-        check_network || log "WARN" "${component}" "Network check failed"
-        check_services || log "WARN" "${component}" "Service check failed"
+        local check_failed=0
+        
+        check_services || check_failed=1
+        check_network || check_failed=1
+        collect_metrics || check_failed=1
+        
+        if [ $check_failed -eq 1 ]; then
+            log "WARN" "$component" "One or more checks failed, continuing monitoring"
+        fi
         
         sleep ${MONITORING_INTERVAL}
     done
