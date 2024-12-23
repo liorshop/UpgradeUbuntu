@@ -122,6 +122,33 @@ EOF
     return 0
 }
 
+# Verify upgrade prerequisites
+verify_prerequisites() {
+    local component="$COMPONENT"
+    local failed=0
+
+    # Check disk space (minimum 10GB free)
+    local free_space=$(df /usr -B1G | awk 'NR==2 {print $4}')
+    if [ "$free_space" -lt 10 ]; then
+        log "ERROR" "$component" "Insufficient disk space. Required: 10GB, Available: ${free_space}GB"
+        failed=1
+    fi
+
+    # Verify package system status
+    if ! dpkg --audit >/dev/null 2>&1; then
+        log "ERROR" "$component" "Package system is in a broken state"
+        failed=1
+    fi
+
+    # Check for held packages
+    if dpkg -l | grep ^hi >/dev/null; then
+        log "ERROR" "$component" "Found held packages that may interfere with upgrade"
+        failed=1
+    fi
+
+    return $failed
+}
+
 # Perform upgrade with detailed logging
 perform_upgrade() {
     local target_version="$1"
@@ -139,6 +166,13 @@ perform_upgrade() {
     export DEBIAN_PRIORITY=critical
     export UCF_FORCE_CONFFNEW=1
     export APT_LISTCHANGES_FRONTEND=none
+    
+    # Verify prerequisites
+    if ! verify_prerequisites; then
+        log "ERROR" "$component" "Prerequisites check failed"
+        stop_monitoring
+        return 1
+    fi
     
     # Verify system state
     if ! verify_system_state; then
